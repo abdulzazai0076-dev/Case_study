@@ -1,0 +1,84 @@
+version: 2
+
+sources:
+  - name: raw
+    description: Raw weather data from Open-Meteo API
+    tables:
+      - name: raw_weather
+        description: Daily weather readings per city
+        columns:
+          - name: city
+            description: City name
+          - name: date
+            description: Date of weather reading
+          - name: temp_max_c
+            description: Maximum temperature in Celsius
+          - name: temp_min_c
+            description: Minimum temperature in Celsius
+          - name: precipitation_mm
+            description: Daily precipitation in millimeters
+          - name: ingested_at
+            description: Timestamp when record was ingested
+
+models:
+  - name: stg_weather
+    description: Cleaned, deduplicated staging layer for weather data
+    columns:
+      - name: city
+        description: City name
+        tests:
+          - not_null
+      - name: date
+        description: Weather observation date
+        tests:
+          - not_null
+      - name: temp_max_c
+        description: Daily maximum temperature
+      - name: temp_min_c
+        description: Daily minimum temperature
+      - name: precipitation_mm
+        description: Daily precipitation sum
+      - name: ingested_at
+        description: Timestamp when record was ingested
+    tests:
+      - unique:
+          column_name: "city || '|' || date"
+          description: "Ensure no duplicate (city, date) combinations after dedup"
+      - dbt_expectations.expect_table_columns_to_match_ordered_list:
+          column_list: [city, date, temp_max_c, temp_min_c, precipitation_mm, ingested_at]
+
+  - name: fct_weather_summary
+    description: Aggregated weather summary per city
+    columns:
+      - name: city
+        description: City name
+        tests:
+          - not_null
+          - unique
+      - name: avg_temp_max_c
+        description: Average daily maximum temperature
+        tests:
+          - not_null
+      - name: avg_temp_min_c
+        description: Average daily minimum temperature
+        tests:
+          - not_null
+      - name: total_precipitation_mm
+        description: Total precipitation across period
+        tests:
+          - not_null
+          - accepted_values:
+              values: [0, 1]
+              description: "Value should be non-negative"
+      - name: rainy_days
+        description: Count of days with precipitation > 1mm
+        tests:
+          - not_null
+      - name: hottest_day
+        description: Date with the highest maximum temperature
+    tests:
+      - dbt_utils.recency:
+          datepart: day
+          field: hottest_day
+          interval: 10
+          description: "Hottest day should be within last 10 days of data"
