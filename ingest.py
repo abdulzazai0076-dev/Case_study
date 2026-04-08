@@ -1,11 +1,11 @@
 """
 Weather data ingestion script
-Pulls data from Open-Meteo API and loads into SQLite database
+Fetches data from Open-Meteo API and loads into SQLite database using pandas
 """
 
+import pandas as pd
 import sqlite3
 import requests
-import json
 from datetime import datetime
 
 # Configuration
@@ -20,32 +20,10 @@ CITIES = [
 ]
 
 
-def init_database():
-    """Create database and raw_weather table"""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS raw_weather (
-            city TEXT NOT NULL,
-            date DATE NOT NULL,
-            temp_max_c FLOAT,
-            temp_min_c FLOAT,
-            precipitation_mm FLOAT,
-            ingested_at TIMESTAMP NOT NULL,
-            PRIMARY KEY (city, date)
-        )
-    """)
-    
-    conn.commit()
-    conn.close()
-    print(f"Database initialized at {DB_PATH}")
-
-
 def get_weather_data(city):
     """Fetch weather data from Open-Meteo API for a single city"""
     try:
-        # Build URL with parameters
+        # Build API parameters
         params = {
             "latitude": city["lat"],
             "longitude": city["lon"],
@@ -53,7 +31,7 @@ def get_weather_data(city):
             "timezone": "UTC"
         }
         
-        # Make API call
+        # Make API request
         response = requests.get(API_URL, params=params, timeout=10)
         response.raise_for_status()
         data = response.json()
@@ -66,98 +44,97 @@ def get_weather_data(city):
         precip = daily.get("precipitation_sum", [])
         
         if not dates:
-            print(f"Warning: No date data for {city['name']}")
+            print(f"  Warning: No date data for {city['name']}")
             return None
         
-        # Create rows
-        rows = []
-        for i in range(len(dates)):
-            row = [
-                city["name"],
-                dates[i],
-                temps_max[i] if i < len(temps_max) else None,
-                temps_min[i] if i < len(temps_min) else None,
-                precip[i] if i < len(precip) else None,
-                datetime.utcnow().isoformat()
-            ]
-            rows.append(row)
+        # Create DataFrame from API response
+        df = pd.DataFrame({
+            "city": city["name"],
+            "date": dates,
+            "temp_max_c": temps_max,
+            "temp_min_c": temps_min,
+            "precipitation_mm": precip,
+            "ingested_at": datetime.utcnow().isoformat()
+        })
         
-        print(f"Fetched {len(rows)} records for {city['name']}")
-        return rows
+        print(f"  Fetched {len(df)} records")
+        return df
     
     except requests.exceptions.HTTPError as e:
-        print(f"HTTP Error for {city['name']}: {e.response.status_code}")
+        print(f"  HTTP Error: {e.response.status_code}")
         return None
-    except requests.exceptions.ConnectionError as e:
-        print(f"Connection Error for {city['name']}: {e}")
+    except requests.exceptions.ConnectionError:
+        print(f"  Connection Error")
         return None
-    except requests.exceptions.Timeout as e:
-        print(f"Timeout Error for {city['name']}: {e}")
-        return None
-    except json.JSONDecodeError as e:
-        print(f"JSON Error for {city['name']}: {e}")
+    except requests.exceptions.Timeout:
+        print(f"  Timeout Error")
         return None
     except Exception as e:
-        print(f"Error for {city['name']}: {e}")
+        print(f"  Error: {e}")
         return None
 
 
-def insert_data(rows):
-    """Insert rows into database"""
-    if not rows:
-        return 0
+def ingest_all_cities():
+    """Fetch and combine data from all cities"""
+    print("Starting weather data ingestion...\n")
     
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
+    all_data = []
     
-    inserted = 0
-    try:
-        for row in rows:
-            cursor.execute("""
-                INSERT OR REPLACE INTO raw_weather 
-                (city, date, temp_max_c, temp_min_c, precipitation_mm, ingested_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, row)
-            inserted += 1
+    for city in CITIES:
+        print(f"Processing {city['name']}...")
+        df = get_weather_data(city)
         
-        conn.commit()
-        print(f"Inserted {inserted} records")
+        if df is not None:
+            all_data.append(df)
+        else:
+            print(f"  Skipped {city['name']} - no data")
+        print()
+    
+    if not all_data:
+        print("No data collected from any city")
+        return None
+    
+    # Combine all city data into single DataFrame
+    combined_df = pd.concat(all_data, ignore_index=True)
+    print(f"Total records fetched: {len(combined_df)}\n")
+    
+    return combined_df
+
+
+def load_to_database(df):
+    """Load DataFrame into SQLite database"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        
+        # Write DataFrame to database
+        # if_exists='replace' ensures idempotency (reingest same data)
+        df.to_sql("raw_weather", conn, if_exists="replace", index=False)
+        
+        conn.close()
+        print(f"Successfully loaded {len(df)} records to {DB_PATH}")
+        
+        return len(df)
     
     except sqlite3.Error as e:
         print(f"Database error: {e}")
-        conn.rollback()
         return 0
-    
-    finally:
-        conn.close()
-    
-    return inserted
+    except Exception as e:
+        print(f"Error loading data: {e}")
+        return 0
 
 
 def main():
     """Main ingestion process"""
-    print("Starting weather data ingestion...")
-    print()
+    # Fetch data from all cities
+    df = ingest_all_cities()
     
-    init_database()
-    total = 0
+    if df is None:
+        print("Ingestion failed - no data collected")
+        return
     
-    for city in CITIES:
-        print(f"Processing {city['name']}...")
-        
-        # Get data from API
-        rows = get_weather_data(city)
-        
-        if rows:
-            # Insert into database
-            count = insert_data(rows)
-            total += count
-        else:
-            print(f"Skipped {city['name']} - no data")
-        
-        print()
-    
-    print(f"Ingestion complete: {total} total records loaded")
+    # Load into database
+    count = load_to_database(df)
+    print(f"Ingestion complete: {count} records loaded")
 
 
 if __name__ == "__main__":

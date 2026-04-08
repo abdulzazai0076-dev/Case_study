@@ -24,23 +24,28 @@ sqlite3 weather.db "SELECT * FROM fct_weather_summary"
 
 ## Technology Stack
 
+### Data Processing: pandas
+- Industry-standard data manipulation library
+- Efficient DataFrame operations for transformations
+- Easy aggregation and grouping operations
+- Direct SQL integration via read_sql_query/to_sql
+
 ### Database: SQLite
 - File based SQL database (single `weather.db` file)
-- serverless
-- Database schema is portable to PostgreSQL for production
+- Serverless and lightweight
+- Direct pandas integration for reading/writing
 
 ### HTTP Library: requests
 - Industry standard library for API calls
 - Clean, intuitive interface
-- Replaces urllib with professional-grade HTTP handling
+- Professional-grade HTTP handling
 
 ### Languages & Libraries
 ```
 Python 3.7+
+- pandas (data transformation)
 - requests (HTTP operations)
 - sqlite3 (database)
-- json (data parsing)
-- logging (operational logging)
 ```
 
 ---
@@ -51,11 +56,11 @@ Python 3.7+
 ```
 Open-Meteo API
     ↓
-ingest.py (fetch & load via requests)
+ingest.py (fetch via requests, load via pandas)
     ↓
 raw_weather table (28 rows - raw API data)
     ↓
-transform.py (SQL transformations)
+transform.py (pandas DataFrame transformations)
     ↓
 stg_weather table (28 rows - deduplicated staging)
     ↓
@@ -63,10 +68,11 @@ fct_weather_summary table (4 rows - aggregated facts)
 ```
 
 ### Design Principles
-- **Idempotent ingestion**: INSERT OR REPLACE prevents duplicates on reruns
+- **Pandas-based transformations**: DataFrames for efficient data manipulations
+- **Idempotent operations**: to_sql(if_exists='replace') ensures clean reruns
 - **Resilient error handling**: Individual city failures don't crash pipeline
-- **Clear separation**: Python for ingestion, SQL for transformation
-- **Simple, readable code**: Direct iteration and explicit logic
+- **Clear separation**: requests for API, pandas for transformations, SQLite for storage
+- **Simple, readable code**: Explicit pandas operations with clear intent
 
 ---
 
@@ -74,11 +80,11 @@ fct_weather_summary table (4 rows - aggregated facts)
 
 ```
 Case_study/
-├── ingest.py                          # API ingestion (requests library)
-├── transform.py                       # Data transformation via SQL
+├── ingest.py                          # API ingestion with pandas DataFrames
+├── transform.py                       # Pandas-based transformations
 ├── models/
-│   ├── staging/stg_weather.sql        # Staging layer SQL
-│   ├── marts/fct_weather_summary.sql  # Fact layer SQL
+│   ├── staging/stg_weather.sql        # Reference SQL (now in pandas)
+│   ├── marts/fct_weather_summary.sql  # Reference SQL (now in pandas)
 │   └── schema.yml                     # Schema documentation
 ├── weather.db                         # SQLite database (auto-generated)
 ├── requirements.txt                   # Python dependencies

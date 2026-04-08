@@ -1,8 +1,9 @@
 """
-Direct transformation execution - creates staging and mart models using SQL.
-This mimics what dbt would do, executing the SQL from our model files.
+Data transformation - creates staging and fact models using pandas
+Performs deduplication, aggregation, and data quality checks
 """
 
+import pandas as pd
 import sqlite3
 import logging
 
@@ -12,88 +13,134 @@ logger = logging.getLogger(__name__)
 DB_PATH = "weather.db"
 
 
-def execute_transformations():
-    """Execute staging and mart models directly."""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
+def create_staging_model(df):
+    """
+    Create staging model from raw data
+    - Deduplicate on (city, date)
+    - Filter out null dates
+    - Keep most recent ingested_at
+    """
+    logger.info("Creating stg_weather staging model...")
     
+    # Filter out rows with null dates
+    df_clean = df[df['date'].notna()].copy()
+    
+    # Deduplicate: keep last ingested record per (city, date)
+    df_staging = df_clean.sort_values('ingested_at').drop_duplicates(
+        subset=['city', 'date'],
+        keep='last'
+    )
+    
+    logger.info(f"Staging model created: {len(df_staging)} rows")
+    return df_staging
+
+
+def create_fact_model(df_staging):
+    """
+    Create fact model from staging data
+    - One row per city
+    - Calculate aggregations:
+      * avg_temp_max_c: Average high temperature
+      * avg_temp_min_c: Average low temperature
+      * total_precipitation_mm: Sum of precipitation
+      * rainy_days: Count of days with precipitation > 1mm
+      * hottest_day: Date with highest temperature
+    """
+    logger.info("Creating fct_weather_summary fact model...")
+    
+    # Group by city and calculate aggregations
+    df_fact = df_staging.groupby('city').agg({
+        'temp_max_c': 'mean',
+        'temp_min_c': 'mean',
+        'precipitation_mm': 'sum'
+    }).round(2).reset_index()
+    
+    # Rename columns
+    df_fact.columns = ['city', 'avg_temp_max_c', 'avg_temp_min_c', 'total_precipitation_mm']
+    
+    # Calculate rainy days (precipitation > 1mm per city)
+    rainy_days = df_staging[df_staging['precipitation_mm'] > 1].groupby('city').size()
+    df_fact['rainy_days'] = df_fact['city'].map(rainy_days).fillna(0).astype(int)
+    
+    # Find hottest day per city
+    hottest_days = df_staging.loc[
+        df_staging.groupby('city')['temp_max_c'].idxmax()
+    ][['city', 'date']].copy()
+    hottest_days.columns = ['city', 'hottest_day']
+    
+    # Merge hottest_day into fact table
+    df_fact = df_fact.merge(hottest_days, on='city', how='left')
+    
+    # Sort by city
+    df_fact = df_fact.sort_values('city').reset_index(drop=True)
+    
+    logger.info(f"Fact model created: {len(df_fact)} rows")
+    return df_fact
+
+
+def save_to_database(df_staging, df_fact):
+    """Save staging and fact models to SQLite database"""
     try:
-        # 1. Create staging model (stg_weather)
-        logger.info("Creating stg_weather staging model...")
-        cursor.execute("""
-            DROP TABLE IF EXISTS stg_weather
-        """)
+        conn = sqlite3.connect(DB_PATH)
         
-        # SQLite doesn't support ROW_NUMBER in CTEs with CREATE, so do it in steps
-        cursor.execute("""
-            CREATE TABLE stg_weather AS
-            SELECT
-                city,
-                date,
-                temp_max_c,
-                temp_min_c,
-                precipitation_mm,
-                MAX(ingested_at) as ingested_at
-            FROM raw_weather
-            WHERE date IS NOT NULL
-            GROUP BY city, date
-        """)
+        # Save staging model
+        df_staging.to_sql('stg_weather', conn, if_exists='replace', index=False)
         
-        stg_count = cursor.execute("SELECT COUNT(*) FROM stg_weather").fetchone()[0]
-        logger.info(f"Staging model created: {stg_count} rows")
+        # Save fact model
+        df_fact.to_sql('fct_weather_summary', conn, if_exists='replace', index=False)
         
-        # 2. Create fact model (fct_weather_summary)
-        logger.info("Creating fct_weather_summary mart model...")
-        cursor.execute("""
-            DROP TABLE IF EXISTS fct_weather_summary
-        """)
+        conn.close()
+        logger.info("Models saved to database")
         
-        cursor.execute("""
-            CREATE TABLE fct_weather_summary AS
-            SELECT
-                city,
-                ROUND(AVG(CAST(temp_max_c AS FLOAT)), 2) as avg_temp_max_c,
-                ROUND(AVG(CAST(temp_min_c AS FLOAT)), 2) as avg_temp_min_c,
-                ROUND(SUM(CAST(precipitation_mm AS FLOAT)), 2) as total_precipitation_mm,
-                COUNT(CASE WHEN CAST(precipitation_mm AS FLOAT) > 1 THEN 1 END) as rainy_days,
-                (SELECT date FROM stg_weather s2 WHERE s2.city = s1.city 
-                 ORDER BY CAST(temp_max_c AS FLOAT) DESC LIMIT 1) as hottest_day
-            FROM stg_weather s1
-            GROUP BY city
-            ORDER BY city
-        """)
+    except Exception as e:
+        logger.error(f"Error saving models: {e}")
+        raise
+
+
+def print_results(df_staging, df_fact):
+    """Print transformation results"""
+    logger.info("\n" + "=" * 60)
+    logger.info("STAGING MODEL (stg_weather):")
+    logger.info("=" * 60)
+    logger.info(f"Rows: {len(df_staging)}")
+    logger.info(f"Columns: {', '.join(df_staging.columns)}")
+    logger.info(f"Sample:\n{df_staging.head()}\n")
+    
+    logger.info("=" * 60)
+    logger.info("FACT MODEL (fct_weather_summary):")
+    logger.info("=" * 60)
+    logger.info(f"Rows: {len(df_fact)}")
+    logger.info(f"Columns: {', '.join(df_fact.columns)}")
+    logger.info(f"Results:\n{df_fact}\n")
+
+
+def execute_transformations():
+    """Execute staging and fact model transformations"""
+    try:
+        # Load raw data from database
+        conn = sqlite3.connect(DB_PATH)
+        df_raw = pd.read_sql_query("SELECT * FROM raw_weather", conn)
+        conn.close()
         
-        fact_count = cursor.execute("SELECT COUNT(*) FROM fct_weather_summary").fetchone()[0]
-        logger.info(f"Fact model created: {fact_count} rows")
+        logger.info(f"Loaded {len(df_raw)} raw records\n")
         
-        conn.commit()
+        # Create staging model
+        df_staging = create_staging_model(df_raw)
+        
+        # Create fact model
+        df_fact = create_fact_model(df_staging)
+        
+        # Save to database
+        save_to_database(df_staging, df_fact)
         
         # Print results
-        logger.info("\n" + "=" * 60)
-        logger.info("STAGING MODEL (stg_weather):")
-        logger.info("=" * 60)
-        cursor.execute("SELECT * FROM stg_weather LIMIT 5")
-        cols = [desc[0] for desc in cursor.description]
-        logger.info(f"Columns: {', '.join(cols)}")
-        logger.info(f"Total rows: {stg_count}\n")
+        print_results(df_staging, df_fact)
         
-        logger.info("=" * 60)
-        logger.info("FACT MODEL (fct_weather_summary):")
-        logger.info("=" * 60)
-        cursor.execute("SELECT * FROM fct_weather_summary")
-        result = cursor.fetchall()
-        cols = [desc[0] for desc in cursor.description]
-        logger.info(f"Columns: {', '.join(cols)}")
-        for row in result:
-            logger.info(row)
-        
-        logger.info("\nTransformations complete!")
+        logger.info("Transformations complete!")
         
     except Exception as e:
         logger.error(f"Transformation failed: {e}")
-        conn.rollback()
-    finally:
-        conn.close()
+        raise
 
 
 if __name__ == "__main__":
