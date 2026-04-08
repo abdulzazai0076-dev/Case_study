@@ -1,6 +1,8 @@
 /*
-Staging model - cleaned, typed, deduplicated raw weather data.
-- Casts to proper types  
+REFERENCE IMPLEMENTATION: Staging model concept for dbt workflow.
+Actual implementation uses pandas in transform.py for this case study.
+
+Conceptual SQL - cleaned, typed, deduplicated raw weather data.
 - Filters null dates
 - Dedupes on (city, date), keeps most recent ingested_at
 */

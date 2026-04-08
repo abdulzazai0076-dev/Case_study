@@ -1,6 +1,8 @@
 /*
-Fact table - analytical summary of weather data per city.
-One row per city with aggregated metrics over the ingested period.
+REFERENCE IMPLEMENTATION: Fact table concept for dbt workflow.
+Actual implementation uses pandas in transform.py for this case study.
+
+Conceptual SQL - analytical summary of weather data per city.
 */
 
 WITH daily_stats AS (
