@@ -29,4 +29,6 @@ coverage.xml
 # Project specific
 *.log
 .env
-local_config.py
+local_config.py*.db
+*.sqlite
+*.sqlite3
